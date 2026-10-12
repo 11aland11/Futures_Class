@@ -1,8 +1,8 @@
 # Section 0 handoff: Issue #5 Phase A only
 
-**Status:** fixture-driven Phase A contribution on `issue-5-section0-phase-a`. This is not the Phase B empirical handoff. No real sample, coverage gate or reference-AUM feasibility claim is made.
+**Status:** fixture-driven Phase A contribution, merged from `issue-5-section0-phase-a` through [PR #18](https://github.com/JacopoMichelacci/Futures_Class/pull/18) into team main on 11 October 2026 at `47ad4d32f09e4bd682fc2ee2cec6a0c27a8dd198`. This is not the Phase B empirical handoff. No real sample, coverage gate or reference-AUM feasibility claim is made.
 
-Issue #5 Phase A calls for shared interfaces, deterministic fixtures and a P&L/Tracking RMSE engine for Part 2. This delivery provides those locally. The merge requirement remains outstanding until the team has reviewed and merged this contribution.
+Issue #5 Phase A calls for shared interfaces, deterministic fixtures and a P&L/Tracking RMSE engine for Part 2. These are now available on team main following review and merge of PR #18. The historical merge requirement is satisfied; Phase B remains outstanding.
 
 ## Reproduction and verified results
 
@@ -34,7 +34,7 @@ Tests use `unittest` and remain pytest-compatible. Pytest, ruff and mypy were no
 
 | Issue criterion | Current status | Evidence or remaining work |
 | --- | --- | --- |
-| Phase A fixtures and engine merged early enough for Part 2 | **Implemented; merge pending team review** | Shared fixture, loader, interfaces, accounting engine and offline CLI exist. Team review and merge remain outstanding. |
+| Phase A fixtures and engine merged early enough for Part 2 | **Satisfied: merged in PR #18** | Shared fixture, loader, interfaces, accounting engine and offline CLI are on team main from 11 October, before the 13 October Part 2 deadline. |
 | Interpolation weights sum to 1, match hand fixtures, flag fallback | **Satisfied at fixture/helper level** | Bracketing, exact-target and no-bracket tests pass. The full historical benchmark builder remains Phase B. |
 | Baseline destination and roll-date state machine matches hand fixtures | **Satisfied at fixture/state-machine level** | Generated nearest-entry, hold and next-deferred -5-session roll path matches hand expectations. Tests cover eligibility loss, unavailable destinations, skipped sessions, late entry and deterministic events. Historical data/position-sizing pipeline remains Phase B. |
 | Holdings for `(t-1,t]` use only information available at `t-1` | **Satisfied for Phase A interfaces/tests** | Per-session cut-offs, as-of selection, provenance checks and unavailable-input masking. Production calendar/source verification remains Phase B. |
@@ -46,7 +46,7 @@ Tests use `unittest` and remain pytest-compatible. Pytest, ruff and mypy were no
 
 Real-data benchmark/baseline/curve/roll-event Parquet files and the tracking-coverage CSV have not been generated. The fixture CLI is explicitly guarded against accidental real-data execution.
 
-All fixture-level Phase A criteria in this mapping are now satisfied. The early-merge criterion remains outstanding pending team review and merge. ADV20 now directly excludes the decision session, checks all 20 consecutive prior observations as of the cut-off, and retains the configured freshness bound. The existing three timing-policy fields are explicitly validated without changing configuration values.
+All fixture-level Phase A criteria in this mapping were satisfied by the reviewed contribution, and the early-merge criterion is now satisfied by PR #18. ADV20 directly excludes the decision session, checks all 20 consecutive prior observations as of the cut-off, and retains the configured freshness bound. The existing three timing-policy fields are explicitly validated without changing configuration values.
 
 ## Downstream readiness and Issue #11
 
@@ -54,13 +54,13 @@ All fixture-level Phase A criteria in this mapping are now satisfied. The early-
 
 **Issue #11 overlap is reconciled for the Phase A scope.** Its description names Alan as owner, although its assignee field is empty. No competing schema/config implementation was found. There is one configuration and one schema-name registry. Individual statistic/as-of observations now have their own name; the wide daily table and dedicated benchmark/contract-return exports retain the Version 8 names and explicit deferred status. Strategy-daily diagnostic fields are present as unknown/null rather than fabricated values. Configuration numbers, the fixture's numerical cases and the P&L/RMSE algorithms were not changed.
 
-This does not complete Issue #11: production field validation, full metadata/provenance and export construction remain deferred. See [the reconciled interface guide](../../docs/section0_phase_a.md#issue-11-ownership-and-reconciliation) for the exact boundaries. The 22-file Phase A contribution is ready for team review; broader declarations must not be described as completed real-data processing.
+This does not complete Issue #11: production field validation, full metadata/provenance and export construction remain deferred. See [the reconciled interface guide](../../docs/section0_phase_a.md#issue-11-ownership-and-reconciliation) for the exact boundaries. The 22-file Phase A contribution is merged; broader declarations must not be described as completed real-data processing.
 
-**Recommended PR structure:** one infrastructure PR for Issue #5 Phase A referencing the partial Issue #11 dependency, with no automatic closure of either full issue. Keep Alan's Issue #6 rounding engine as a separate, clearly Issue-linked Part 2 contribution under the team plan. Splitting this incomplete schema subset into another PR would add a dependency without delivering an independently complete Issue #11. No GitHub issue state or comment was changed.
+**Delivered PR structure:** PR #18 covers Issue #5 Phase A and the partial Issue #11 dependency without completing either full issue. Keep Alan's Issue #6 rounding engine as a separate, clearly Issue-linked Part 2 contribution under the team plan. Splitting this incomplete schema subset into another PR would add a dependency without delivering an independently complete Issue #11.
 
 ## Complete shared-file inventory
 
-All 22 files below are new. No existing tracked file was edited by this implementation. The branch inherits upstream main's existing tooling and lockfile changes; those are not Phase A edits.
+All 22 files below were added by PR #18 and are now merged. No previously tracked file was edited by that implementation. Its branch inherited upstream main's existing tooling and lockfile changes; those were not Phase A edits.
 
 | File | Purpose |
 | --- | --- |

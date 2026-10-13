@@ -167,6 +167,15 @@ class FallbackTests(unittest.TestCase):
         # A qualifier after the deadline cannot influence the decision.
         self.assertTrue(all(c["decision_date"] < MINUS_5 for c in out["checked"]))
 
+    def test_crossover_between_minus_five_and_anchor_is_ignored(self):
+        # Qualifies two sessions after -5 but before the anchor: too late for a causal -5 fallback.
+        s = store(series("cleared_volume", {d: (200, 100) for d in DATES[5:15]}
+                         | {DATES[17]: (100, 200)}))
+        out = timing("volume_crossover", s)
+        self.assertEqual(out["roll_decision_date"], MINUS_5)
+        self.assertTrue(out["fallback_flag"])
+        self.assertNotIn(DATES[17], [c["decision_date"] for c in out["checked"]])
+
     def test_deadline_after_minus_five_is_rejected(self):
         with self.assertRaises(ContractError):
             timing("volume_crossover", store([]), deadline=DATES[16])

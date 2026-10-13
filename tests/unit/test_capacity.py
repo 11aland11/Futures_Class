@@ -113,6 +113,14 @@ class CapacityTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             deferred_overflow_candidates("ZC_SYN_NEAR", rows[1:], self.fixture.catalogue, day)
 
+    def test_deferred_candidates_reject_incomplete_date_curve(self):
+        day = "2030-02-05"
+        rows = [row for row in self.fixture.raw["baseline_path_case"]["eligible_curve"]
+                if row["date"] == day and row["commodity"] == "ZC"
+                and row["contract"] != "ZC_SYN_FAR"]
+        with self.assertRaisesRegex(ContractError, "curve is incomplete.*ZC_SYN_FAR"):
+            deferred_overflow_candidates("ZC_SYN_NEAR", rows, self.fixture.catalogue, day)
+
     def test_next_overflow_converts_dollar_residual_to_one_contract_value(self):
         result = allocate_overflow_next(
             "550", ("near", "far"), {"near": 3, "far": 99},
@@ -182,9 +190,10 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(weighted.diagnostics[0]["unimplemented_notional"], Decimal("0"))
         for portfolio in methods.values():
             for row in portfolio.rows:
-                if row.capacity_limit_contracts is not None:
-                    self.assertLessEqual(row.post_capacity_fractional_contracts,
-                                         Decimal(row.capacity_limit_contracts))
+                self.assertIs(type(row.capacity_limit_contracts), int)
+                self.assertGreaterEqual(row.maturity_rank, 1)
+                self.assertLessEqual(row.post_capacity_fractional_contracts,
+                                     Decimal(row.capacity_limit_contracts))
             self.assertNotIn("implemented_contracts", portfolio.rows[0].to_record())
             self.assertEqual(portfolio.rows[0].dollar_contract_notional, Decimal("20250"))
         self.assertTrue(any(row.post_capacity_fractional_contracts % 1 != 0
@@ -211,8 +220,32 @@ class CapacityTests(unittest.TestCase):
             build_capacity_portfolio([target], curve, self.fixture.observations,
                                      self.fixture.catalogue, CapacityMethod.HARD_TRUNCATE)
 
+    def test_builder_accepts_dollar_only_target_without_exact_decimal_round_trip(self):
+        _, target, curve = self._portfolio_inputs()
+        target.pop("pre_capacity_contracts")
+        target["target_notional"] = "333333.33"
+        result = build_capacity_portfolio(
+            [target], curve, self.fixture.observations, self.fixture.catalogue,
+            CapacityMethod.HARD_TRUNCATE)
+        self.assertEqual(result.rows[0].target_notional, Decimal("333333.33"))
+        self.assertEqual(result.diagnostics[0]["requested_notional"], Decimal("333333.33"))
+        self.assertAlmostEqual(float(result.rows[0].post_capacity_fractional_contracts),
+                               333333.33 / 20250, places=12)
+
+    def test_builder_allows_cent_rounding_when_quantity_and_notional_are_both_supplied(self):
+        _, target, curve = self._portfolio_inputs()
+        target["pre_capacity_contracts"] = str(Decimal("333333.33") / Decimal("20250"))
+        target["target_notional"] = "333333.33"
+        result = build_capacity_portfolio(
+            [target], curve, self.fixture.observations, self.fixture.catalogue,
+            CapacityMethod.HARD_TRUNCATE)
+        self.assertEqual(result.rows[0].target_notional, Decimal("333333.33"))
+
     def test_builder_flags_when_deferred_adv_is_unavailable(self):
         _, target, curve = self._portfolio_inputs()
+        curve = [dict(row, maturity_rank=None)
+                 if row["contract"] in {"ZC_SYN_NEXT", "ZC_SYN_FAR"} else row
+                 for row in curve]
         original_adv20 = self.fixture.observations.adv20
 
         def unavailable_deferred(contract, context):
@@ -227,8 +260,8 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(result.diagnostics[0]["unimplemented_notional"], Decimal("2511000"))
         self.assertIn("no_valid_positive_adv20_capacity_or_value", result.diagnostics[0]["flags"])
         candidate_rows = [row for row in result.rows if row.contract != "ZC_SYN_NEAR"]
-        self.assertTrue(candidate_rows)
-        self.assertTrue(all(row.post_capacity_fractional_contracts == 0 for row in candidate_rows))
+        self.assertEqual(candidate_rows, [])
+        self.assertTrue(all(type(row.capacity_limit_contracts) is int for row in result.rows))
         self.assertTrue(all(row.decision_cutoff == self.fixture.calendar.decision(target["date"]).cutoff_utc
                             for row in result.rows))
 

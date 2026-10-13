@@ -25,6 +25,9 @@ data or run the historical analysis.
   unimplemented; alternatives allocate to the next contract, fill the next two
   sequentially, or weight the next two by positive ADV20. The weighted rule
   reallocates around a saturated recipient cap.
+- The capacity builder requires a complete decision-date curve for every
+  catalogue contract active between its activation and expiration dates. A
+  missing contract row is an input error, not evidence of ineligibility.
 - Missing or non-positive candidate ADV20, capacity or contract value makes
   that recipient unavailable. Unsupported residual notional remains explicit
   and flagged. If primary ADV20 or its dollar value is unavailable, construction
@@ -34,6 +37,10 @@ The output contains fractional post-capacity quantities, each contract's
 integer capacity ceiling, post-capacity dollar notional, decision cutoff,
 source timestamp and flags. It is not a rounded `Holding`; the separate
 rounding stage consumes these fractional quantities and ceilings.
+Zero-allocation overflow recipients are omitted from the rows passed to that
+stage; their unimplemented exposure and availability flags remain in the
+diagnostics. Every emitted row has an integer capacity ceiling and positive
+maturity rank.
 
 ## Reproduce the synthetic demonstration
 

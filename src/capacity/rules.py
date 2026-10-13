@@ -136,6 +136,12 @@ def _nonnegative_integer(value, name: str) -> int:
     return value
 
 
+def _positive_integer(value, name: str) -> int:
+    if type(value) is not int or value < 1:
+        raise ContractError(f"{name} must be a positive integer")
+    return value
+
+
 def _normalise_method(method: CapacityMethod | str) -> CapacityMethod:
     try:
         return method if isinstance(method, CapacityMethod) else CapacityMethod(method)
@@ -225,7 +231,7 @@ def integer_capacity_limit(adv20_contracts, participation_rate=Decimal("0.025"),
 
 
 def apply_primary_cap(pre_capacity_contracts, capacity_limit_contracts: int,
-                      dollar_contract_notional) -> PrimaryCap:
+                      dollar_contract_notional, requested_notional=None) -> PrimaryCap:
     """Apply a per-contract ceiling without rounding fractional target quantity."""
     requested = decimal_value(pre_capacity_contracts, "pre_capacity_contracts")
     limit = _nonnegative_integer(capacity_limit_contracts, "capacity_limit_contracts")
@@ -234,16 +240,25 @@ def apply_primary_cap(pre_capacity_contracts, capacity_limit_contracts: int,
         raise ContractError("Target quantity must be non-negative and contract value positive")
     implemented = min(requested, Decimal(limit))
     residual = requested - implemented
-    requested_notional = requested * contract_value
+    requested_dollars = (requested * contract_value if requested_notional is None
+                         else decimal_value(requested_notional, "requested_notional"))
+    if requested_dollars < 0:
+        raise ContractError("Requested notional must be non-negative")
     implemented_notional = implemented * contract_value
-    residual_notional = residual * contract_value
+    residual_notional = (max(requested_dollars - implemented_notional, Decimal(0))
+                         if residual > 0 else Decimal(0))
     return PrimaryCap(requested, limit, implemented, residual, contract_value,
-                      requested_notional, implemented_notional, residual_notional)
+                      requested_dollars, implemented_notional, residual_notional)
 
 
 def deferred_overflow_candidates(primary_contract: str, eligible_curve: Iterable[dict],
                                   catalogue: Mapping, trading_date: str) -> tuple[str, ...]:
-    """Return eligible maturities after primary, nearest deferred first."""
+    """Validate a complete date curve and return deferred eligible maturities.
+
+    Every catalogue contract whose explicit activation/expiration range covers
+    the date must have a curve row. A missing row is not treated as an
+    ineligible contract.
+    """
     primary = catalogue.get(primary_contract)
     if primary is None or primary.identity.contract != primary_contract:
         raise ContractError("Primary contract is missing or mismatched in the catalogue")
@@ -265,6 +280,8 @@ def deferred_overflow_candidates(primary_contract: str, eligible_curve: Iterable
         eligible = row.get("eligible")
         if type(eligible) is not bool:
             raise ContractError("Curve eligibility must be explicit")
+        if row.get("anchor") != contract.anchor:
+            raise ContractError("Curve anchor does not match its contract catalogue")
         if eligible and not is_eligible(contract, trading_date):
             raise ContractError("Curve marks an inactive or expired contract eligible")
         if symbol == primary_contract:
@@ -275,6 +292,20 @@ def deferred_overflow_candidates(primary_contract: str, eligible_curve: Iterable
             candidates.append(symbol)
     if primary_contract not in seen:
         raise ContractError("Primary contract is absent from the supplied eligible curve")
+    expected = {
+        symbol for symbol, contract in catalogue.items()
+        if contract.identity.root == primary.identity.root
+        and contract.activation <= trading_date <= contract.expiration
+    }
+    missing = expected - seen
+    unexpected = seen - expected
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing contracts: {', '.join(sorted(missing))}")
+        if unexpected:
+            details.append(f"contracts outside active catalogue range: {', '.join(sorted(unexpected))}")
+        raise ContractError("Decision-date eligible curve is incomplete (" + "; ".join(details) + ")")
     return tuple(sorted(candidates, key=lambda symbol: (catalogue[symbol].anchor, symbol)))
 
 
@@ -495,19 +526,24 @@ def build_capacity_portfolio(targets: Iterable[dict], eligible_curve: Iterable[d
 
         raw_quantity = target.get("pre_capacity_contracts",
                                   target.get("post_capacity_fractional_contracts"))
-        raw_notional = target.get("target_notional")
+        raw_notional_value = target.get("target_notional")
+        raw_notional = (decimal_value(raw_notional_value, "target_notional")
+                        if raw_notional_value is not None else None)
         if raw_quantity is None and raw_notional is None:
             raise ContractError("Capacity target requires fractional quantity or target notional")
         requested = (decimal_value(raw_quantity, "pre_capacity_contracts")
                      if raw_quantity is not None
-                     else decimal_value(raw_notional, "target_notional") / primary_value.value)
+                     else raw_notional / primary_value.value)
         if requested < 0:
             raise ContractError("Target quantity must be non-negative")
-        requested_notional = requested * primary_value.value
-        if raw_notional is not None and decimal_value(raw_notional, "target_notional") != requested_notional:
-            raise ContractError("Target notional must match fractional quantity times primary dollar contract value")
+        quantity_notional = requested * primary_value.value
+        requested_notional = quantity_notional if raw_notional is None else raw_notional
+        if (raw_quantity is not None and raw_notional is not None
+                and abs(raw_notional - quantity_notional) > Decimal("0.01")):
+            raise ContractError("Target notional must match fractional quantity times primary dollar contract value within one cent")
 
-        primary_cap = apply_primary_cap(requested, primary_limit, primary_value.value)
+        primary_cap = apply_primary_cap(requested, primary_limit, primary_value.value,
+                                       requested_notional=requested_notional)
         candidate_adv: dict[str, ADV20Result] = {}
         candidate_value: dict[str, ContractValueResult] = {}
         candidate_limits: dict[str, int | None] = {}
@@ -573,8 +609,17 @@ def build_capacity_portfolio(targets: Iterable[dict], eligible_curve: Iterable[d
 
         strategy = _strategy_name(str(strategy_base), method)
         for symbol, quantity in quantities.items():
+            if symbol != primary_symbol and quantity == 0:
+                # Zero overflow rows may have no usable cap/value and are not
+                # valid inputs to the downstream rounding stage.
+                continue
             value = values_by_contract.get(symbol)
             curve_row = next((row for row in curve_rows if row["contract"] == symbol), {})
+            if limits.get(symbol) is None:
+                raise ContractError(f"Capacity output for {symbol} lacks an integer ceiling or maturity rank")
+            capacity_limit = _nonnegative_integer(limits[symbol], f"capacity[{symbol}]")
+            maturity_rank = _positive_integer(curve_row.get("maturity_rank"),
+                                              f"maturity_rank[{symbol}]")
             flags = tuple(base_flags if symbol == primary_symbol else (
                 ("candidate_capacity_or_value_unavailable",)
                 if limits.get(symbol) is None or value is None else ()))
@@ -585,10 +630,10 @@ def build_capacity_portfolio(targets: Iterable[dict], eligible_curve: Iterable[d
                 target_notional=(requested_notional if symbol == primary_symbol else None),
                 pre_capacity_contracts=requested_quantities.get(symbol, Decimal(0)),
                 post_capacity_fractional_contracts=quantity,
-                capacity_limit_contracts=limits.get(symbol),
+                capacity_limit_contracts=capacity_limit,
                 dollar_contract_notional=value,
                 post_capacity_notional=quantity * value if value is not None else Decimal(0),
-                maturity_rank=curve_row.get("maturity_rank"),
+                maturity_rank=maturity_rank,
                 days_to_anchor=curve_row.get("days_to_anchor"),
                 decision_cutoff=cutoff, formed_at=formed_at, inputs_as_of=inputs_as_of,
                 flags=flags,

@@ -1,35 +1,39 @@
 # Capacity engine: fixture-driven Part 2 scope
 
-`src/capacity/rules.py` implements the reusable capacity helpers for Jacopo's
+`src/capacity/rules.py` implements reusable capacity helpers for Jacopo's
 Person 3 strand. It consumes the shared `ObservationStore`, verified calendar,
-contract catalogue and an explicit eligible curve. It does not acquire market
+contract catalogue and explicit eligible curve. It does not acquire market
 data or run the historical analysis.
 
 ## Locked rules
 
-- ADV20 comes from the shared as-of store. It uses 20 consecutive verified
-  sessions before the decision session; current/future sessions and late
+- ADV20 comes from the shared as-of store and uses exactly 20 verified
+  sessions before the decision session. Current/future sessions and late
   publications are excluded.
-- The integer limit is `floor(0.025 * ADV20 * 1 day)`. Both assumptions come
-  from the locked project configuration and are not experiment parameters.
-- The target is rounded to the nearest whole primary-contract equivalent,
-  with half contracts rounded up, then capped at the primary limit.
+- The integer ceiling is `floor(0.025 * ADV20 * 1 day)`. These are locked
+  configuration assumptions, not experiment parameters.
+- Capacity acts on fractional requested contract quantities. It does not round
+  the target before applying the integer per-contract ceiling.
+- A decision-time dollar value for each contract is calculated from its latest
+  valid settlement available by the decision cutoff and the catalogue's
+  verified dollars-per-price-unit multiplier.
+- Primary capacity is applied first. Any residual is kept in dollars and
+  converted into fractional quantities using each deferred contract's own
+  decision-time dollar value.
 - Overflow candidates are eligible contracts with an anchor later than the
-  primary contract, ordered by anchor. This is relative to the supplied
-  primary, so it remains compatible with a future destination rule.
-- The baseline truncates residual exposure. Alternatives send residual to the
-  next deferred contract, fill the next two sequentially, or split across the
-  next two by positive ADV20. The ADV-weighted rule reallocates around a
-  saturated capacity and leaves any unsupported residual explicit.
-- If primary ADV20 is unavailable, construction fails closed. For overflow,
-  missing or non-positive ADV20 makes that candidate unavailable; if neither
-  candidate has valid positive ADV20 and capacity, the residual stays
-  unimplemented and the output is flagged.
+  primary, ordered by anchor. The baseline leaves residual notional
+  unimplemented; alternatives allocate to the next contract, fill the next two
+  sequentially, or weight the next two by positive ADV20. The weighted rule
+  reallocates around a saturated recipient cap.
+- Missing or non-positive candidate ADV20, capacity or contract value makes
+  that recipient unavailable. Unsupported residual notional remains explicit
+  and flagged. If primary ADV20 or its dollar value is unavailable, construction
+  fails closed.
 
-All functions are deterministic. `build_capacity_portfolio` emits standard
-`Holding` rows with each contract's own capacity ceiling, integer quantity,
-decision cut-off, input timestamp and flags. It only considers deferred
-contracts after primary capacity binds.
+The output contains fractional post-capacity quantities, each contract's
+integer capacity ceiling, post-capacity dollar notional, decision cutoff,
+source timestamp and flags. It is not a rounded `Holding`; the separate
+rounding stage consumes these fractional quantities and ceilings.
 
 ## Reproduce the synthetic demonstration
 
@@ -40,13 +44,12 @@ uv run --no-sync python -B scripts/run_capacity.py --fixtures
 uv run --no-sync python -B -m unittest discover -s tests/unit -p 'test_capacity.py' -v
 ```
 
-The demonstration uses the existing Phase A synthetic observations for its
-portfolio case and runs the hand-authored allocator cases in
-`data/fixtures/capacity_phase_a.json`. It prints all four approaches and
-explicitly reports `method_selected: false`. One allocator check reallocates
-after a candidate reaches its cap; another exercises the no-valid-ADV20
-fallback. These values are test examples, not market estimates or Part 3
-findings.
+The demonstration uses only the existing Phase A synthetic observations and
+hand-authored allocator cases in `data/fixtures/capacity_phase_a.json`. It
+prints all four approaches and explicitly reports `method_selected: false`.
+The checks include unequal dollar contract values, reallocation after a
+recipient reaches its cap, and a no-valid-recipient fallback. These are test
+examples, not market estimates or Part 3 findings.
 
 ## Part 3 boundary
 

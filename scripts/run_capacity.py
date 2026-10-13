@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+from decimal import Decimal
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -47,22 +48,24 @@ def main():
     allocator_checks = {}
     for allocation_case in fixture_cases["allocation_cases"]:
         name = allocation_case["name"]
+        values = allocation_case["dollar_contract_values"]
         if name.startswith("adv_weighted"):
             allocation = allocate_overflow_adv_weighted(
-                allocation_case["residual_contracts"], allocation_case["candidates"],
-                allocation_case["capacity_limits"], allocation_case["adv20_by_contract"],
+                allocation_case["residual_notional"], allocation_case["candidates"],
+                allocation_case["capacity_limits"], values, allocation_case["adv20_by_contract"],
             )
         else:
             allocation = allocate_overflow_sequential(
-                allocation_case["residual_contracts"], allocation_case["candidates"],
-                allocation_case["capacity_limits"],
+                allocation_case["residual_notional"], allocation_case["candidates"],
+                allocation_case["capacity_limits"], values,
             )
-        expected = allocation_case["expected_allocations"]
+        expected = {key: Decimal(value) for key, value in allocation_case["expected_allocations"].items()}
+        expected_residual = Decimal(allocation_case["expected_unimplemented_notional"])
         if (dict(allocation.allocations) != expected
-                or allocation.unimplemented_contracts != allocation_case["expected_unimplemented"]):
+                or allocation.unimplemented_notional != expected_residual):
             raise RuntimeError(f"Fixture expectation failed: {name}")
         allocator_checks[name] = {"allocations": dict(allocation.allocations),
-                                  "unimplemented_contracts": allocation.unimplemented_contracts,
+                                  "unimplemented_notional": allocation.unimplemented_notional,
                                   "flags": allocation.flags}
     print(json.dumps({"mode": "synthetic_fixture_only", "real_data_gate_run": False,
                       "method_selected": False, "allocator_hand_checks": allocator_checks,

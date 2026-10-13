@@ -1,14 +1,13 @@
-"""Pure capacity rules and a deterministic adapter to shared Phase A inputs.
+"""Capacity limits and fractional residual allocation before integer rounding.
 
-Capacities are integer contracts from strictly lagged ADV20. Targets are
-expressed in primary-contract equivalents and rounded once, using the locked
-nearest-integer convention, before capacity is applied. Deferred candidates
-are ordered by maturity relative to the selected primary contract.
+Capacity caps contract quantities using strictly lagged ADV20. Residual target
+notional is allocated to later eligible contracts using each contract's own
+publication-safe decision-time dollar value. This module never rounds holdings.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
+from decimal import Decimal, ROUND_FLOOR
 from enum import Enum
 from types import MappingProxyType
 from typing import Iterable, Mapping, Sequence
@@ -16,7 +15,6 @@ from typing import Iterable, Mapping, Sequence
 from src.contracts.eligibility import is_eligible
 from src.data.asof import ObservationStore
 from src.data.calendar import Decision
-from src.portfolio.holdings import Holding
 from src.validation.schemas import ContractError, decimal_value, utc_ns
 
 
@@ -44,36 +42,91 @@ class ADV20Result:
 
 
 @dataclass(frozen=True)
+class ContractValueResult:
+    """A decision-time dollar value per contract and its settlement source."""
+
+    contract: str
+    available: bool
+    value: Decimal | None
+    settlement: Decimal | None
+    settlement_date: str | None
+    publication_timestamp: str | None
+    reason: str | None
+
+
+@dataclass(frozen=True)
 class PrimaryCap:
-    """Rounded primary request, capped quantity and residual contracts."""
+    """Fractional requested/capped quantities and dollar residual."""
 
     requested_contracts: Decimal
-    rounded_requested_contracts: int
     capacity_limit_contracts: int
-    implemented_contracts: int
-    residual_contracts: int
+    implemented_contracts: Decimal
+    residual_contracts: Decimal
+    dollar_contract_notional: Decimal
+    requested_notional: Decimal
+    implemented_notional: Decimal
+    residual_notional: Decimal
 
     @property
     def capacity_binds(self) -> bool:
-        return self.residual_contracts > 0
+        return self.residual_notional > 0
 
 
 @dataclass(frozen=True)
 class OverflowAllocation:
-    """Integer overflow allocations plus the requested amount per candidate."""
+    """Fractional contract allocations and any unsupported residual notional."""
 
-    allocations: Mapping[str, int]
+    allocations: Mapping[str, Decimal]
     demand_contracts: Mapping[str, Decimal]
-    unimplemented_contracts: int
+    demand_notional: Mapping[str, Decimal]
+    unimplemented_notional: Decimal
     flags: tuple[str, ...]
 
 
 @dataclass(frozen=True)
+class CapacityRow:
+    """Fractional output passed to a downstream, separate rounding stage."""
+
+    date: str
+    strategy: str
+    commodity: str
+    contract: str
+    target_weight: Decimal | None
+    target_notional: Decimal | None
+    pre_capacity_contracts: Decimal
+    post_capacity_fractional_contracts: Decimal
+    capacity_limit_contracts: int | None
+    dollar_contract_notional: Decimal | None
+    post_capacity_notional: Decimal
+    maturity_rank: int | None
+    days_to_anchor: int | None
+    decision_cutoff: str
+    formed_at: str
+    inputs_as_of: str
+    flags: tuple[str, ...]
+
+    def to_record(self) -> dict:
+        return {
+            "date": self.date, "strategy": self.strategy,
+            "commodity": self.commodity, "contract": self.contract,
+            "target_weight": self.target_weight, "target_notional": self.target_notional,
+            "pre_capacity_contracts": self.pre_capacity_contracts,
+            "post_capacity_fractional_contracts": self.post_capacity_fractional_contracts,
+            "capacity_limit_contracts": self.capacity_limit_contracts,
+            "dollar_contract_notional": self.dollar_contract_notional,
+            "post_capacity_notional": self.post_capacity_notional,
+            "maturity_rank": self.maturity_rank, "days_to_anchor": self.days_to_anchor,
+            "decision_cutoff": self.decision_cutoff, "formed_at": self.formed_at,
+            "inputs_as_of": self.inputs_as_of, "flags": ";".join(self.flags) or None,
+        }
+
+
+@dataclass(frozen=True)
 class CapacityPortfolio:
-    """Long-form holding rows and auditable capacity diagnostics."""
+    """Fractional capacity rows and auditable diagnostics; no rounding applied."""
 
     method: CapacityMethod
-    rows: tuple[Holding, ...]
+    rows: tuple[CapacityRow, ...]
     diagnostics: tuple[dict, ...]
 
 
@@ -101,12 +154,7 @@ def _validate_candidates(candidates: Sequence[str]) -> tuple[str, ...]:
 
 def compute_adv20(observations: ObservationStore, contract: str,
                   context: Decision) -> ADV20Result:
-    """Read ADV20 from the shared as-of store, excluding the decision session.
-
-    ``context`` is the already validated decision for the return interval. The
-    underlying store requires all 20 consecutive verified sessions before its
-    decision session, so current or late-published volume cannot leak in.
-    """
+    """Read exactly 20 prior verified sessions from the shared as-of store."""
     if not isinstance(observations, ObservationStore):
         raise ContractError("compute_adv20 requires the shared ObservationStore")
     if not isinstance(contract, str) or contract not in observations.identities:
@@ -125,14 +173,45 @@ def compute_adv20(observations: ObservationStore, contract: str,
     if len(rows) != 20 or len(set(source_dates)) != 20:
         raise ContractError("Available ADV20 must contain 20 distinct sessions")
     if any(row["session_index"] >= context.decision_index for row in rows):
-        raise ContractError("ADV20 must exclude the decision session and all later sessions")
+        raise ContractError("ADV20 must exclude the decision session and later sessions")
     return ADV20Result(contract, True, value, None, result.get("window_start"),
                        result.get("window_end"), 20, source_dates)
 
 
+def decision_time_dollar_contract_value(observations: ObservationStore, catalogue: Mapping,
+                                        contract: str, context: Decision) -> ContractValueResult:
+    """Use the latest valid settlement published by the decision cut-off.
+
+    The source settlement is in the shared quote unit; multiplying by the
+    catalogue's verified ``dollars_per_price_unit`` gives USD per contract.
+    """
+    if not isinstance(observations, ObservationStore):
+        raise ContractError("Contract value requires the shared ObservationStore")
+    definition = catalogue.get(contract)
+    if definition is None or definition.identity.contract != contract:
+        raise ContractError("Contract value requires a known exact catalogue identity")
+    observations.validate_context(context)
+    selection = observations.latest_available(contract, "settlement", context)
+    if selection.observation is None:
+        return ContractValueResult(contract, False, None, None, None, None, selection.reason)
+    settlement = selection.observation.statistic_value
+    if settlement is None or settlement <= 0:
+        return ContractValueResult(contract, False, None, settlement,
+                                   selection.observation.trading_date,
+                                   selection.observation.publication_timestamp,
+                                   "non_positive_or_missing_settlement")
+    value = settlement * decimal_value(definition.dollars_per_price_unit,
+                                       "dollars_per_price_unit")
+    if value <= 0:
+        raise ContractError("Decision-time dollar contract value must be positive")
+    return ContractValueResult(contract, True, value, settlement,
+                               selection.observation.trading_date,
+                               selection.observation.publication_timestamp, None)
+
+
 def integer_capacity_limit(adv20_contracts, participation_rate=Decimal("0.025"),
                            liquidation_horizon_days=1) -> int | None:
-    """Return ``floor(participation * ADV20 * horizon)``; None means unavailable."""
+    """Return floor(participation * lagged ADV20 * horizon); None means unavailable."""
     if adv20_contracts is None:
         return None
     adv = decimal_value(adv20_contracts, "ADV20")
@@ -145,24 +224,26 @@ def integer_capacity_limit(adv20_contracts, participation_rate=Decimal("0.025"),
     return int((adv * rate * horizon).to_integral_value(rounding=ROUND_FLOOR))
 
 
-def apply_primary_cap(pre_capacity_contracts, capacity_limit_contracts: int) -> PrimaryCap:
-    """Round to nearest whole contract, cap the primary and expose residual."""
+def apply_primary_cap(pre_capacity_contracts, capacity_limit_contracts: int,
+                      dollar_contract_notional) -> PrimaryCap:
+    """Apply a per-contract ceiling without rounding fractional target quantity."""
     requested = decimal_value(pre_capacity_contracts, "pre_capacity_contracts")
     limit = _nonnegative_integer(capacity_limit_contracts, "capacity_limit_contracts")
-    if requested < 0:
-        raise ContractError("Target contract quantity must be non-negative")
-    rounded = int(requested.to_integral_value(rounding=ROUND_HALF_UP))
-    implemented = min(rounded, limit)
-    return PrimaryCap(requested, rounded, limit, implemented, rounded - implemented)
+    contract_value = decimal_value(dollar_contract_notional, "dollar_contract_notional")
+    if requested < 0 or contract_value <= 0:
+        raise ContractError("Target quantity must be non-negative and contract value positive")
+    implemented = min(requested, Decimal(limit))
+    residual = requested - implemented
+    requested_notional = requested * contract_value
+    implemented_notional = implemented * contract_value
+    residual_notional = residual * contract_value
+    return PrimaryCap(requested, limit, implemented, residual, contract_value,
+                      requested_notional, implemented_notional, residual_notional)
 
 
 def deferred_overflow_candidates(primary_contract: str, eligible_curve: Iterable[dict],
-                                 catalogue: Mapping, trading_date: str) -> tuple[str, ...]:
-    """Return eligible maturities after primary, nearest deferred first.
-
-    Curve rows must describe one commodity and one decision date. The order is
-    derived from explicit catalogue anchors, not a global nearby rank.
-    """
+                                  catalogue: Mapping, trading_date: str) -> tuple[str, ...]:
+    """Return eligible maturities after primary, nearest deferred first."""
     primary = catalogue.get(primary_contract)
     if primary is None or primary.identity.contract != primary_contract:
         raise ContractError("Primary contract is missing or mismatched in the catalogue")
@@ -175,7 +256,8 @@ def deferred_overflow_candidates(primary_contract: str, eligible_curve: Iterable
             raise ContractError("Overflow curve must contain rows for one date and primary commodity")
         symbol = row.get("contract")
         contract = catalogue.get(symbol)
-        if contract is None or contract.identity.contract != symbol or contract.identity.root != primary.identity.root:
+        if (contract is None or contract.identity.contract != symbol
+                or contract.identity.root != primary.identity.root):
             raise ContractError("Overflow curve identity does not match its contract catalogue")
         if symbol in seen:
             raise ContractError("Duplicate contract in overflow curve")
@@ -196,145 +278,166 @@ def deferred_overflow_candidates(primary_contract: str, eligible_curve: Iterable
     return tuple(sorted(candidates, key=lambda symbol: (catalogue[symbol].anchor, symbol)))
 
 
-def _empty_overflow(residual: int) -> OverflowAllocation:
-    return OverflowAllocation(MappingProxyType({}), MappingProxyType({}), residual, ())
+def _valid_candidate(contract: str, capacity_limits: Mapping[str, int | None],
+                     contract_values: Mapping[str, Decimal | None]) -> tuple[int, Decimal] | None:
+    cap = capacity_limits.get(contract)
+    value = contract_values.get(contract)
+    if cap is None or value is None:
+        return None
+    cap = _nonnegative_integer(cap, f"capacity[{contract}]")
+    value = decimal_value(value, f"dollar_contract_notional[{contract}]")
+    if cap == 0 or value <= 0:
+        return None
+    return cap, value
 
 
-def allocate_overflow_next(residual_contracts: int, candidates: Sequence[str],
-                           capacity_limits: Mapping[str, int | None]) -> OverflowAllocation:
-    """Put residual in the nearest deferred contract up to its own cap."""
-    residual = _nonnegative_integer(residual_contracts, "residual_contracts")
+def _overflow_result(allocations: dict[str, Decimal], demands: dict[str, Decimal],
+                     notionals: dict[str, Decimal], residual: Decimal,
+                     flags: Iterable[str]) -> OverflowAllocation:
+    return OverflowAllocation(MappingProxyType(allocations), MappingProxyType(demands),
+                              MappingProxyType(notionals), residual, tuple(flags))
+
+
+def allocate_overflow_next(residual_notional, candidates: Sequence[str],
+                           capacity_limits: Mapping[str, int | None],
+                           contract_values: Mapping[str, Decimal | None]) -> OverflowAllocation:
+    """Send dollar residual to only the nearest deferred contract up to its cap."""
+    residual = decimal_value(residual_notional, "residual_notional")
+    if residual < 0:
+        raise ContractError("Residual notional must be non-negative")
     candidates = _validate_candidates(candidates)
     if residual == 0:
-        return _empty_overflow(0)
+        return _overflow_result({}, {}, {}, Decimal(0), ())
     if not candidates:
-        return OverflowAllocation(MappingProxyType({}), MappingProxyType({}), residual,
-                                  ("no_eligible_deferred_candidate",))
+        return _overflow_result({}, {}, {}, residual, ("no_eligible_deferred_candidate",))
     contract = candidates[0]
-    cap = capacity_limits.get(contract)
-    if cap is None:
-        return OverflowAllocation(MappingProxyType({contract: 0}),
-                                  MappingProxyType({contract: Decimal(residual)}), residual,
-                                  ("no_valid_candidate_capacity",))
-    cap = _nonnegative_integer(cap, f"capacity[{contract}]")
-    filled = min(residual, cap)
-    flags = ("overflow_residual_unimplemented",) if filled < residual else ()
-    return OverflowAllocation(MappingProxyType({contract: filled}),
-                              MappingProxyType({contract: Decimal(residual)}),
-                              residual - filled, flags)
+    valid = _valid_candidate(contract, capacity_limits, contract_values)
+    if valid is None:
+        return _overflow_result({contract: Decimal(0)}, {contract: Decimal(0)},
+                                {contract: Decimal(0)}, residual,
+                                ("no_valid_candidate_capacity_or_value", "overflow_residual_unimplemented"))
+    cap, value = valid
+    demand = residual / value
+    amount = min(demand, Decimal(cap))
+    notional = amount * value
+    remaining = residual - notional
+    flags = ("overflow_residual_unimplemented",) if remaining > 0 else ()
+    return _overflow_result({contract: amount}, {contract: demand}, {contract: notional},
+                            remaining, flags)
 
 
-def allocate_overflow_sequential(residual_contracts: int, candidates: Sequence[str],
-                                 capacity_limits: Mapping[str, int | None]) -> OverflowAllocation:
-    """Fill the first and then second deferred candidates, respecting each cap."""
-    residual = _nonnegative_integer(residual_contracts, "residual_contracts")
+def allocate_overflow_sequential(residual_notional, candidates: Sequence[str],
+                                 capacity_limits: Mapping[str, int | None],
+                                 contract_values: Mapping[str, Decimal | None]) -> OverflowAllocation:
+    """Fill the next two contracts in order, converting dollars at each value."""
+    residual = decimal_value(residual_notional, "residual_notional")
+    if residual < 0:
+        raise ContractError("Residual notional must be non-negative")
     candidates = _validate_candidates(candidates)[:2]
-    if residual == 0:
-        return _empty_overflow(0)
-    allocation, demand = {}, {}
+    allocations: dict[str, Decimal] = {}
+    demands: dict[str, Decimal] = {}
+    notionals: dict[str, Decimal] = {}
     remaining = residual
+    unavailable = False
     for contract in candidates:
-        demand[contract] = Decimal(remaining)
-        cap = capacity_limits.get(contract)
-        if cap is None:
-            allocation[contract] = 0
+        valid = _valid_candidate(contract, capacity_limits, contract_values)
+        if valid is None:
+            allocations[contract] = Decimal(0)
+            demands[contract] = Decimal(0)
+            notionals[contract] = Decimal(0)
+            unavailable = True
             continue
-        cap = _nonnegative_integer(cap, f"capacity[{contract}]")
-        amount = min(remaining, cap)
-        allocation[contract] = amount
-        remaining -= amount
+        cap, value = valid
+        demand = remaining / value
+        amount = min(demand, Decimal(cap))
+        notional = amount * value
+        allocations[contract] = amount
+        demands[contract] = demand
+        notionals[contract] = notional
+        remaining -= notional
+    flags = []
     if not candidates:
-        flags = ("no_eligible_deferred_candidate",)
-    elif remaining:
-        flags = ("overflow_residual_unimplemented",)
-        if not any(capacity_limits.get(c) is not None and capacity_limits[c] > 0 for c in candidates):
-            flags = ("no_valid_candidate_capacity", "overflow_residual_unimplemented")
-    else:
-        flags = ()
-    return OverflowAllocation(MappingProxyType(allocation), MappingProxyType(demand), remaining, flags)
+        flags.append("no_eligible_deferred_candidate")
+    if unavailable and remaining > 0:
+        flags.append("candidate_capacity_or_value_unavailable")
+    if remaining > 0:
+        flags.append("overflow_residual_unimplemented")
+    return _overflow_result(allocations, demands, notionals, remaining, flags)
 
 
-def allocate_overflow_adv_weighted(residual_contracts: int, candidates: Sequence[str],
+def allocate_overflow_adv_weighted(residual_notional, candidates: Sequence[str],
                                    capacity_limits: Mapping[str, int | None],
+                                   contract_values: Mapping[str, Decimal | None],
                                    adv20_by_contract: Mapping[str, Decimal | int | float | str | None]) -> OverflowAllocation:
-    """Split overflow over two contracts by ADV20, reflowing around saturated caps.
+    """ADV-weight dollar residual over two recipients, reallocating at dollar caps.
 
-    Integer remainders use largest fractional quota, with deferred order as the
-    stable tie break. Candidates with missing/non-positive ADV20 or no capacity
-    are skipped; unfilled target is reported and flagged.
+    Allocations remain fractional contract quantities. This function intentionally
+    does no integer rounding; the separate fixed rounding stage receives these
+    quantities and the per-contract capacity ceilings.
     """
-    residual = _nonnegative_integer(residual_contracts, "residual_contracts")
+    residual = decimal_value(residual_notional, "residual_notional")
+    if residual < 0:
+        raise ContractError("Residual notional must be non-negative")
     candidates = _validate_candidates(candidates)[:2]
     if residual == 0:
-        return _empty_overflow(0)
+        return _overflow_result({}, {}, {}, Decimal(0), ())
+    if not candidates:
+        return _overflow_result({}, {}, {}, residual, ("no_eligible_deferred_candidate",))
+
     valid = []
-    invalid_adv = []
+    unavailable = False
     for index, contract in enumerate(candidates):
         raw_adv = adv20_by_contract.get(contract)
-        if raw_adv is None:
-            invalid_adv.append(contract)
+        recipient = _valid_candidate(contract, capacity_limits, contract_values)
+        if raw_adv is None or recipient is None:
+            unavailable = True
             continue
         adv = decimal_value(raw_adv, f"ADV20[{contract}]")
         if adv <= 0:
-            invalid_adv.append(contract)
+            unavailable = True
             continue
-        cap = capacity_limits.get(contract)
-        if cap is None:
-            continue
-        cap = _nonnegative_integer(cap, f"capacity[{contract}]")
-        if cap > 0:
-            valid.append((index, contract, adv, cap))
+        cap, value = recipient
+        valid.append((index, contract, adv, cap, value))
 
-    allocation = {contract: 0 for contract in candidates}
-    demand = {contract: Decimal(0) for contract in candidates}
+    allocations = {contract: Decimal(0) for contract in candidates}
+    demands = {contract: Decimal(0) for contract in candidates}
+    notionals = {contract: Decimal(0) for contract in candidates}
     if not valid:
-        if not candidates:
-            flags = ("no_eligible_deferred_candidate",)
-        else:
-            flags = ("no_valid_positive_adv20_capacity", "overflow_residual_unimplemented")
-        return OverflowAllocation(MappingProxyType(allocation), MappingProxyType(demand), residual, flags)
+        flags = ["no_valid_positive_adv20_capacity_or_value", "overflow_residual_unimplemented"]
+        return _overflow_result(allocations, demands, notionals, residual, flags)
 
     remaining = residual
     active = list(valid)
     while remaining > 0 and active:
         total_weight = sum((entry[2] for entry in active), Decimal(0))
-        quotas = {entry[1]: Decimal(remaining) * entry[2] / total_weight for entry in active}
+        quotas = {entry[1]: remaining * entry[2] / total_weight for entry in active}
         saturated = [entry for entry in active
-                     if quotas[entry[1]] >= Decimal(entry[3] - allocation[entry[1]])]
+                     if quotas[entry[1]] >= Decimal(entry[3]) * entry[4] - notionals[entry[1]]]
         if saturated:
-            for entry in saturated:
-                _, contract, _, cap = entry
-                room = cap - allocation[contract]
-                allocation[contract] += room
-                demand[contract] += Decimal(room)
+            saturated_names = set()
+            for _, contract, _, cap, value in saturated:
+                room = Decimal(cap) * value - notionals[contract]
+                room = min(room, remaining)
+                notionals[contract] += room
+                allocations[contract] = notionals[contract] / value
+                demands[contract] += room / value
                 remaining -= room
-            saturated_names = {entry[1] for entry in saturated}
+                saturated_names.add(contract)
             active = [entry for entry in active if entry[1] not in saturated_names]
             continue
-
-        floors = {}
-        for _, contract, _, _ in active:
-            quota = quotas[contract]
-            floors[contract] = int(quota.to_integral_value(rounding=ROUND_FLOOR))
-            demand[contract] += quota
-            allocation[contract] += floors[contract]
-        left = remaining - sum(floors.values())
-        ranked = sorted(active, key=lambda entry: (-(quotas[entry[1]] - floors[entry[1]]), entry[0]))
-        for _, contract, _, cap in ranked:
-            if left == 0:
-                break
-            if allocation[contract] < cap:
-                allocation[contract] += 1
-                left -= 1
-        remaining = left
-        break
+        for _, contract, _, _, value in active:
+            notional = quotas[contract]
+            notionals[contract] += notional
+            allocations[contract] += notional / value
+            demands[contract] += notional / value
+        remaining = Decimal(0)
 
     flags = []
-    if invalid_adv:
-        flags.append("candidate_adv20_unavailable")
-    if remaining:
+    if unavailable:
+        flags.append("candidate_adv20_capacity_or_value_unavailable")
+    if remaining > 0:
         flags.append("overflow_residual_unimplemented")
-    return OverflowAllocation(MappingProxyType(allocation), MappingProxyType(demand), remaining, tuple(flags))
+    return _overflow_result(allocations, demands, notionals, remaining, flags)
 
 
 def _strategy_name(base: str, method: CapacityMethod) -> str:
@@ -346,20 +449,18 @@ def build_capacity_portfolio(targets: Iterable[dict], eligible_curve: Iterable[d
                              method: CapacityMethod | str,
                              participation_rate=Decimal("0.025"),
                              liquidation_horizon_days=1) -> CapacityPortfolio:
-    """Build validated long-form holdings from explicit primary target rows.
+    """Apply capacity to fractional target quantities; leave rounding downstream.
 
-    Each target has ``date`` (the return-interval end), ``commodity``,
-    ``primary_contract`` (or ``contract``), and ``pre_capacity_contracts``
-    (or ``post_capacity_fractional_contracts``). Curves are keyed to the
-    preceding decision session. Deferred demand is measured in primary-contract
-    equivalents, keeping the locked capacity experiment isolated from contract
-    selection, roll timing, target weights and rounding methodology.
+    A target supplies ``date``, ``commodity``, a primary contract and either
+    its fractional pre-capacity quantity or target notional. When both quantity
+    and notional are supplied, they must reconcile to the primary's decision-time
+    dollar contract value.
     """
     if not isinstance(observations, ObservationStore):
         raise ContractError("Capacity construction requires the shared ObservationStore")
     method = _normalise_method(method)
     curves = tuple(eligible_curve)
-    rows: list[Holding] = []
+    rows: list[CapacityRow] = []
     diagnostics: list[dict] = []
     seen_targets = set()
 
@@ -368,7 +469,6 @@ def build_capacity_portfolio(targets: Iterable[dict], eligible_curve: Iterable[d
         context = observations.calendar.decision(date)
         commodity = target.get("commodity")
         primary_symbol = target.get("primary_contract", target.get("contract"))
-        primary_quantity = target.get("pre_capacity_contracts", target.get("post_capacity_fractional_contracts"))
         strategy_base = target.get("strategy", "capacity")
         key = (date, strategy_base, commodity)
         if key in seen_targets:
@@ -381,94 +481,132 @@ def build_capacity_portfolio(targets: Iterable[dict], eligible_curve: Iterable[d
 
         curve_rows = [row for row in curves if row.get("date") == context.decision_date
                       and row.get("commodity") == commodity]
-        candidates = deferred_overflow_candidates(primary_symbol, curve_rows, catalogue, context.decision_date)
+        candidates = deferred_overflow_candidates(primary_symbol, curve_rows, catalogue,
+                                                  context.decision_date)
         primary_adv = compute_adv20(observations, primary_symbol, context)
         if not primary_adv.available or primary_adv.value is None:
             raise ContractError(f"Primary ADV20 unavailable for {primary_symbol}: {primary_adv.reason}")
-        primary_limit = integer_capacity_limit(primary_adv.value, participation_rate, liquidation_horizon_days)
-        if primary_limit is None:
-            raise ContractError("Primary integer capacity is unavailable")
-        primary_cap = apply_primary_cap(primary_quantity, primary_limit)
+        primary_limit = integer_capacity_limit(primary_adv.value, participation_rate,
+                                               liquidation_horizon_days)
+        primary_value = decision_time_dollar_contract_value(observations, catalogue,
+                                                            primary_symbol, context)
+        if not primary_value.available or primary_value.value is None:
+            raise ContractError(f"Primary dollar contract value unavailable for {primary_symbol}: {primary_value.reason}")
 
+        raw_quantity = target.get("pre_capacity_contracts",
+                                  target.get("post_capacity_fractional_contracts"))
+        raw_notional = target.get("target_notional")
+        if raw_quantity is None and raw_notional is None:
+            raise ContractError("Capacity target requires fractional quantity or target notional")
+        requested = (decimal_value(raw_quantity, "pre_capacity_contracts")
+                     if raw_quantity is not None
+                     else decimal_value(raw_notional, "target_notional") / primary_value.value)
+        if requested < 0:
+            raise ContractError("Target quantity must be non-negative")
+        requested_notional = requested * primary_value.value
+        if raw_notional is not None and decimal_value(raw_notional, "target_notional") != requested_notional:
+            raise ContractError("Target notional must match fractional quantity times primary dollar contract value")
+
+        primary_cap = apply_primary_cap(requested, primary_limit, primary_value.value)
         candidate_adv: dict[str, ADV20Result] = {}
+        candidate_value: dict[str, ContractValueResult] = {}
         candidate_limits: dict[str, int | None] = {}
         if primary_cap.capacity_binds and method != CapacityMethod.HARD_TRUNCATE:
             considered = candidates[:1] if method == CapacityMethod.OVERFLOW_NEXT else candidates[:2]
             for symbol in considered:
-                result = compute_adv20(observations, symbol, context)
-                candidate_adv[symbol] = result
-                candidate_limits[symbol] = (integer_capacity_limit(result.value, participation_rate,
+                adv = compute_adv20(observations, symbol, context)
+                value = decision_time_dollar_contract_value(observations, catalogue, symbol, context)
+                candidate_adv[symbol] = adv
+                candidate_value[symbol] = value
+                candidate_limits[symbol] = (integer_capacity_limit(adv.value, participation_rate,
                                                                    liquidation_horizon_days)
-                                            if result.available else None)
+                                            if adv.available else None)
         else:
             considered = ()
 
-        overflow = _empty_overflow(primary_cap.residual_contracts)
+        values = {symbol: result.value if result.available else None
+                  for symbol, result in candidate_value.items()}
+        overflow = _overflow_result({}, {}, {}, primary_cap.residual_notional, ())
         if primary_cap.capacity_binds and method == CapacityMethod.OVERFLOW_NEXT:
-            overflow = allocate_overflow_next(primary_cap.residual_contracts, considered, candidate_limits)
+            overflow = allocate_overflow_next(primary_cap.residual_notional, considered,
+                                              candidate_limits, values)
         elif primary_cap.capacity_binds and method == CapacityMethod.OVERFLOW_SEQUENTIAL:
-            overflow = allocate_overflow_sequential(primary_cap.residual_contracts, considered, candidate_limits)
+            overflow = allocate_overflow_sequential(primary_cap.residual_notional, considered,
+                                                    candidate_limits, values)
         elif primary_cap.capacity_binds and method == CapacityMethod.OVERFLOW_ADV_WEIGHTED:
             overflow = allocate_overflow_adv_weighted(
-                primary_cap.residual_contracts, considered, candidate_limits,
-                {symbol: result.value if result.available else None for symbol, result in candidate_adv.items()},
+                primary_cap.residual_notional, considered, candidate_limits, values,
+                {symbol: result.value if result.available else None
+                 for symbol, result in candidate_adv.items()},
             )
 
-        allocation = {primary_symbol: primary_cap.implemented_contracts}
-        demand = {primary_symbol: Decimal(primary_cap.rounded_requested_contracts)}
-        capacity_limits = {primary_symbol: primary_limit}
-        allocation.update(overflow.allocations)
-        demand.update(overflow.demand_contracts)
-        capacity_limits.update({symbol: candidate_limits.get(symbol) for symbol in overflow.allocations})
+        quantities = {primary_symbol: primary_cap.implemented_contracts}
+        requested_quantities = {primary_symbol: primary_cap.requested_contracts}
+        values_by_contract = {primary_symbol: primary_value.value}
+        limits = {primary_symbol: primary_limit}
+        quantities.update(overflow.allocations)
+        requested_quantities.update(overflow.demand_contracts)
+        values_by_contract.update(values)
+        limits.update({symbol: candidate_limits.get(symbol) for symbol in overflow.allocations})
 
         cutoff = context.cutoff_utc
         formed_at = target.get("formed_at", cutoff)
         target_inputs_asof = target.get("inputs_as_of", cutoff)
         if utc_ns(target_inputs_asof) > context.cutoff_ns or utc_ns(formed_at) > context.cutoff_ns:
             raise ContractError("Target inputs and formation time must be available by the decision cut-off")
-        used_observations = [primary_adv, *candidate_adv.values()]
-        publications = [row["publication_timestamp"] for adv in used_observations if adv.available
-                        for row in observations.adv20(adv.contract, context).get("rows", [])]
-        inputs_as_of = max([target_inputs_asof, *publications], key=utc_ns)
-        flags = list(overflow.flags)
+        publication_times = [primary_value.publication_timestamp]
+        used_advs = [primary_adv, *candidate_adv.values()]
+        used_values = [primary_value, *candidate_value.values()]
+        publication_times.extend(result.publication_timestamp for result in used_values
+                                 if result.available and result.publication_timestamp)
+        publication_times.extend(
+            record["publication_timestamp"]
+            for adv in used_advs if adv.available
+            for record in observations.adv20(adv.contract, context).get("rows", [])
+        )
+        inputs_as_of = max([target_inputs_asof, *publication_times], key=utc_ns)
+        base_flags = list(overflow.flags)
         if primary_cap.capacity_binds:
-            flags.insert(0, "primary_capacity_binding")
-        if overflow.unimplemented_contracts:
-            flags.append(f"unimplemented_contracts={overflow.unimplemented_contracts}")
+            base_flags.insert(0, "primary_capacity_binding")
+        if overflow.unimplemented_notional > 0:
+            base_flags.append(f"unimplemented_notional={overflow.unimplemented_notional}")
 
         strategy = _strategy_name(str(strategy_base), method)
-        for symbol, quantity in allocation.items():
-            contract = catalogue[symbol]
-            curve_row = next((r for r in curve_rows if r["contract"] == symbol), {})
-            row_flags = list(flags if symbol == primary_symbol else ())
-            if symbol != primary_symbol and capacity_limits.get(symbol) is None:
-                row_flags.append("candidate_capacity_unavailable")
-            details = {
-                "target_weight": target.get("target_weight") if symbol == primary_symbol else None,
-                "target_notional": target.get("target_notional") if symbol == primary_symbol else None,
-                "pre_capacity_contracts": (decimal_value(primary_quantity) if symbol == primary_symbol
-                                           else demand.get(symbol, Decimal(0))),
-                "capacity_limit_contracts": capacity_limits.get(symbol),
-                "implemented_notional": None,
-                "maturity_rank": curve_row.get("maturity_rank"),
-                "days_to_anchor": curve_row.get("days_to_anchor"),
-                "flags": ";".join(row_flags) if row_flags else None,
-            }
-            rows.append(Holding(
+        for symbol, quantity in quantities.items():
+            value = values_by_contract.get(symbol)
+            curve_row = next((row for row in curve_rows if row["contract"] == symbol), {})
+            flags = tuple(base_flags if symbol == primary_symbol else (
+                ("candidate_capacity_or_value_unavailable",)
+                if limits.get(symbol) is None or value is None else ()))
+            rows.append(CapacityRow(
                 date=date, strategy=strategy, commodity=commodity, contract=symbol,
+                target_weight=(decimal_value(target["target_weight"], "target_weight")
+                               if symbol == primary_symbol and target.get("target_weight") is not None else None),
+                target_notional=(requested_notional if symbol == primary_symbol else None),
+                pre_capacity_contracts=requested_quantities.get(symbol, Decimal(0)),
+                post_capacity_fractional_contracts=quantity,
+                capacity_limit_contracts=limits.get(symbol),
+                dollar_contract_notional=value,
+                post_capacity_notional=quantity * value if value is not None else Decimal(0),
+                maturity_rank=curve_row.get("maturity_rank"),
+                days_to_anchor=curve_row.get("days_to_anchor"),
                 decision_cutoff=cutoff, formed_at=formed_at, inputs_as_of=inputs_as_of,
-                implemented_contracts=quantity, details=details,
+                flags=flags,
             ))
         diagnostics.append({
             "date": date, "strategy": strategy, "commodity": commodity,
             "method": method.value, "primary_contract": primary_symbol,
             "adv20_contracts": primary_adv.value,
             "primary_capacity_limit_contracts": primary_limit,
+            "primary_dollar_contract_notional": primary_value.value,
             "requested_contracts": primary_cap.requested_contracts,
-            "rounded_requested_contracts": primary_cap.rounded_requested_contracts,
-            "primary_implemented_contracts": primary_cap.implemented_contracts,
+            "requested_notional": primary_cap.requested_notional,
+            "primary_post_capacity_fractional_contracts": primary_cap.implemented_contracts,
+            "primary_post_capacity_notional": primary_cap.implemented_notional,
+            "primary_residual_notional": primary_cap.residual_notional,
             "overflow_allocations": dict(overflow.allocations),
-            "unimplemented_contracts": overflow.unimplemented_contracts,
-            "flags": tuple(flags),
+            "overflow_notionals": dict(overflow.demand_notional),
+            "unimplemented_notional": overflow.unimplemented_notional,
+            "flags": tuple(base_flags),
         })
     return CapacityPortfolio(method, tuple(rows), tuple(diagnostics))

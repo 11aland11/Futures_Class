@@ -1,6 +1,6 @@
 # Section 0 Phase A interfaces and review boundary
 
-Branch: `issue-5-section0-phase-a`, based on upstream main `0a51609ba5a621fd2e3b49ba919fd513b73bdc2f`.
+Historical implementation branch: `issue-5-section0-phase-a`, originally based on upstream main `0a51609ba5a621fd2e3b49ba919fd513b73bdc2f`. **Current status:** [PR #18](https://github.com/JacopoMichelacci/Futures_Class/pull/18) merged into team main on 11 October 2026 at `47ad4d32f09e4bd682fc2ee2cec6a0c27a8dd198`.
 
 This is the fixture-driven infrastructure portion of [GitHub Issue #5](https://github.com/JacopoMichelacci/Futures_Class/issues/5), whose title carries specification roadmap number `[4]`. The shared schema/configuration dependency is [GitHub Issue #11](https://github.com/JacopoMichelacci/Futures_Class/issues/11), roadmap item `[2]`. Those numbering systems must not be confused. Alan's later rounding contribution remains separate under GitHub Issue #6.
 
@@ -8,7 +8,7 @@ This is the fixture-driven infrastructure portion of [GitHub Issue #5](https://g
 
 The shared code provides explicit calendars and as-of observations, validated long-form holdings, exact-contract dollar P&L, fixed-AUM returns, and daily Tracking RMSE. It also supplies a pure benchmark interpolation helper, contract eligibility/maturity primitives, an executable fixture-driven baseline contract state machine and synthetic inputs for downstream engines.
 
-There is no acquisition client, September loader, real-data calendar, full benchmark/baseline pipeline, strand rule, real-data preflight, empirical comparison or method selector in this delivery. Baseline contract selection and roll transitions are implemented; historical quantity sizing, capacity and rounding are not. This contribution is intended for team review; merging remains the repository owner's responsibility.
+There is no acquisition client, September loader, real-data calendar, full benchmark/baseline pipeline, strand rule, real-data preflight, empirical comparison or method selector in this delivery. Baseline contract selection and roll transitions are implemented; historical quantity sizing, capacity and rounding are not. Phase A is now merged and available to the team; Phase B remains outstanding.
 
 ## Running the verified fixture workflow
 
@@ -78,7 +78,7 @@ The new `baseline_path_case` fixture supplies eight consecutive decision curves.
 
 ## Issue #11 ownership and reconciliation
 
-The live Issue #11 description names **Alan** as owner; its GitHub assignee field is empty. Issue #5 is assigned to `11aland11`. The inspected upstream main contains no configuration or source implementation, and no open PR supplied competing interfaces. We therefore found no evidence that another teammate's assigned implementation was overwritten or duplicated.
+At the pre-merge reconciliation, Issue #11 named **Alan** as owner with no GitHub assignee, and Issue #5 was assigned to `11aland11`. The then-inspected upstream main (`0a51609`) contained no configuration or source implementation, and no open PR supplied competing interfaces. That historical check found no evidence of another teammate's implementation being overwritten or duplicated. Team main now contains this shared configuration and source through merged PR #18.
 
 There is intentional cross-issue scope overlap: [project.yaml](../config/project.yaml) and [schemas.py](../src/validation/schemas.py) supply the minimum dependency subset needed by Phase A. **That subset is now reconciled for Phase A, but must not be presented as completion of Issue #11.** No second schema module or configuration was introduced.
 
@@ -102,7 +102,7 @@ Remaining Issue #11 work is broader production-schema validation, full metadata/
 
 ## Recommended PR structure and Part 2 evidence
 
-Use **one shared-infrastructure PR** for Issue #5 Phase A, explicitly referencing the included prerequisite subset of Issue #11. Suggested scope wording: “Implements Phase A of #5 and the config/schema dependency subset of #11; leaves Phase B and the remaining #11 production contracts open.” Avoid automatic closing keywords for either full issue.
+The **shared-infrastructure PR #18** delivered Issue #5 Phase A and explicitly referenced the prerequisite subset of Issue #11. Its scope was: “Implements Phase A of #5 and the config/schema dependency subset of #11; leaves Phase B and the remaining #11 production contracts open.” Its merge does not complete either full issue.
 
 Do not split this small, incomplete Issue #11 subset into a second contribution merely to increase the PR count. The files are needed together for a runnable fixture demonstration, and the wider Issue #11 deliverable is intentionally unfinished. A separate schema PR would make sense later only for a separately complete, independently reviewable scope.
 

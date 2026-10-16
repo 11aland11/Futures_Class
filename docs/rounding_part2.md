@@ -16,6 +16,8 @@ Scalar rules accept a non-negative post-capacity fractional quantity and its non
 
 `RoundingTarget` supplies explicit commodity and exact contract identity, a positive maturity rank, the post-capacity fractional quantity, dollar contract notional, integer capacity ceiling, target weight and target notional. The producer must supply the same targets and contracts to every method, with truthful decision-time provenance. Ranks must uniquely order held contracts within each root; ambiguous ranks and duplicate contracts fail validation.
 
+The rounding engine validates the post-capacity positions supplied to it but does not independently require that ZC, ZS and ZW are all present. Required project-commodity completeness is an upstream Section 0 / Part 3 experiment-preflight responsibility. A missing commodity must not be silently interpreted as zero exposure.
+
 Residual-greedy starts from toward-zero quantities. It selects the feasible one-contract addition with the greatest strictly positive decrease in
 
 ```text
@@ -24,6 +26,8 @@ sum_i ((post_capacity_fractional_quantity_i - integer_quantity_i)
 ```
 
 Exact ties use the shared root order ZC, ZS, ZW, then earlier supplied maturity rank. Exact rational arithmetic preserves improvement comparisons without float tolerances. A zero improvement is not accepted. `GreedyResult` retains immutable quantities, the initial/final squared error and an ordered trace of accepted additions. This objective is only a construction rule; it is never a substitute for daily return Tracking RMSE.
+
+Residual greedy has no shared notional-budget constraint. Its squared dollar-notional error objective is separable by contract, so in unconstrained cases it will generally agree with nearest rounding except where the strict-positive-improvement rule differs, especially exact half cases. At an exact half, nearest uses half-up while residual greedy receives zero improvement from adding the extra contract and therefore remains at floor. This behaviour is intentional under the locked project specification and does not introduce another optimisation constraint.
 
 The builder returns a shared `HoldingsBook` containing one implemented snapshot. Its `date` is the return-interval end. The shared calendar determines the preceding decision cut-off, and `Holding` enforces `inputs_as_of <= formed_at <= decision_cutoff`. Zero quantities remain explicit. Combine these rows with the shared benchmark and other strategy rows before calling `portfolio_pnl` once for the entire comparison, followed by `tracking_rmse_bps`. Use one fixed AUM and one common valid-date mask.
 

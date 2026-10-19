@@ -156,7 +156,7 @@ class CrossoverTests(unittest.TestCase):
 
 
 class FallbackTests(unittest.TestCase):
-    """Per the proposed causal boundary in Issue #23 -- pending team sign-off."""
+    """Per the causal boundary agreed on Issue #23."""
 
     def test_no_crossover_falls_back_to_minus_five_and_flags(self):
         s = store(series("cleared_volume", {d: (200, 100) for d in DATES[5:20]}))

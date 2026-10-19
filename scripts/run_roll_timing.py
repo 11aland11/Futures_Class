@@ -1,7 +1,7 @@
 """Fixture-only roll-timing demonstration (Issue #23). Never downloads market data.
 
 Applies the four timing rules to the shared Phase A baseline pair. The crossover
-search window is the proposed causal boundary (pending team sign-off): from the
+search window is the causal boundary agreed on Issue #23: from the
 first supplied decision session up to, but excluding, the baseline -5 session.
 """
 import argparse

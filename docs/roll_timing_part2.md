@@ -30,15 +30,15 @@ Timing only. Every rule uses the same baseline outgoing/incoming pair taken from
 - **Missing data.** A missing or unaligned pair observation is recorded as `no_aligned_publication_safe_pair`. It is never treated as a crossover. Missing OI does not affect the volume rule, and missing volume does not affect the OI rule.
 - **First qualifier.** The search stops at the first qualifying session. Later qualifiers cannot replace it.
 
-## Causal search boundary — proposed, pending team sign-off
+## Causal search boundary — agreed on Issue #23
 
-Version 8 says to fall back to -5 "if no crossover occurs before eligibility ends". Taken literally, the -5 decision would depend on observations that arrive after -5. The proposal recorded on Issue #23:
+Version 8 says to fall back to -5 "if no crossover occurs before eligibility ends". Taken literally, the -5 decision would depend on observations that arrive after -5. The boundary agreed on Issue #23 (approved by Alan on 16 Oct 2026; no objections raised):
 
 1. **Search deadline = the baseline -5 decision session.** Only decision sessions strictly before it are searched.
 2. **Search start = the first decision session on which the outgoing contract is held.**
 3. If no session qualifies, roll at -5 with `fallback_flag=True`.
 
-Under this proposal a crossover rule can only roll at or before -5, and the fallback never depends on later information. The code does not default either bound: `search_start` and `search_deadline` are required arguments. A deadline after the -5 session is rejected. The fallback tests and the demo use the proposed values and are labelled as pending sign-off.
+Under this rule a crossover rule can only roll at or before -5, and the fallback never depends on later information. The code does not default either bound: `search_start` and `search_deadline` are required arguments. A deadline after the -5 session is rejected. The fallback tests and the demo use these agreed values.
 
 ## Validation
 

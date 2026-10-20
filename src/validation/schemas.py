@@ -72,6 +72,19 @@ OBSERVATION_COLUMNS = (
     "selected_as_of", "lag_from_decision_sessions", "lag_from_interval_end_sessions", "adv20_window_index",
 )
 
+# Context-free source events, distinct from Observation.view() decision views.
+# These reuse the shared Observation fields; a wide daily snapshot is neither.
+OBSERVATION_EVENT_COLUMNS = (
+    "dataset", "publisher_id", "instrument_id", "contract", "root", "observation_id",
+    "trading_date", "publication_timestamp", "venue_event_timestamp", "statistic_type",
+    "statistic_value", "value_unit", "stat_flags", "update_action", "sequence",
+    "channel_id", "session_index", "invalid_reason",
+)
+POST_CAPACITY_TARGET_COLUMNS = (
+    "commodity", "contract", "maturity_rank", "post_capacity_fractional_contracts",
+    "dollar_contract_notional", "capacity_limit_contracts", "target_weight", "target_notional",
+)
+
 # Version 8 Appendix B names are reserved here even where Phase A does not
 # materialise a table. Declarations do not imply production validation or data.
 # HOLDINGS_COLUMNS remains the unified engine representation from Section 36;
@@ -83,7 +96,7 @@ TABLE_COLUMNS = {
         "expiration", "first_notice", "anchor", "min_price_increment", "min_price_increment_amount",
         "display_factor", "main_fraction", "sub_fraction", "unit_of_measure", "unit_of_measure_qty",
         "derived_price_scale", "tick_value", "source_note", "first_notice_source_url", "first_notice_retrieved_at",
-        "dataset", "publisher_id", "instrument_id", "dollars_per_price_unit", "anchor_source",
+        "dataset", "publisher_id", "instrument_id", "dollars_per_price_unit", "anchor_source", "value_unit",
     ),
     "daily_contract_data": (
         "trading_date", "commodity", "contract", "eligible", "settlement", "settlement_quality",

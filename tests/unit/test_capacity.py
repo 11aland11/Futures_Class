@@ -13,6 +13,7 @@ from src.capacity.rules import (
     allocate_overflow_sequential,
     apply_primary_cap,
     build_capacity_portfolio,
+    capacity_rounding_targets,
     compute_adv20,
     decision_time_dollar_contract_value,
     deferred_overflow_candidates,
@@ -131,6 +132,65 @@ class CapacityTests(unittest.TestCase):
         self.assertIn("overflow_residual_unimplemented", result.flags)
         self.assertEqual(dict(allocate_overflow_next(0, ("near",), {"near": 3},
                                                      {"near": "100"}).allocations), {})
+
+    def test_sequential_overflow_decimal_round_trip_never_creates_negative_later_fill(self):
+        result = allocate_overflow_sequential(
+            "0.8999999999999999999999999999", ("first", "second"),
+            {"first": 3, "second": 4}, {"first": "0.3", "second": "0.1"})
+        self.assertGreaterEqual(result.allocations["first"], Decimal(0))
+        self.assertGreaterEqual(result.allocations["second"], Decimal(0))
+        self.assertLessEqual(result.allocations["first"], Decimal(3))
+        self.assertLessEqual(result.allocations["second"], Decimal(4))
+        self.assertEqual(result.unimplemented_notional, Decimal(0))
+
+    def test_capacity_to_rounding_adapter_rejects_missing_source_weight(self):
+        _, target, curve = self._portfolio_inputs()
+        target.pop("target_weight")
+        portfolio = build_capacity_portfolio(
+            [target], curve, self.fixture.observations,
+            self.fixture.catalogue, CapacityMethod.OVERFLOW_NEXT)
+        with self.assertRaisesRegex(ContractError, "source target_weight"):
+            capacity_rounding_targets(portfolio)
+
+    def test_capacity_to_rounding_adapter_supplies_truthful_positive_row_metadata(self):
+        case, target, curve = self._portfolio_inputs()
+        requested_notional = Decimal(target["target_notional"])
+        source_weight = Decimal(target["target_weight"])
+        for method in CapacityMethod:
+            with self.subTest(method=method):
+                portfolio = build_capacity_portfolio(
+                    [target], curve, self.fixture.observations,
+                    self.fixture.catalogue, method)
+                rounding_targets = capacity_rounding_targets(portfolio)
+                self.assertTrue(rounding_targets)
+                for rounding_target in rounding_targets:
+                    self.assertEqual(set(rounding_target), {
+                        "commodity", "contract", "maturity_rank",
+                        "post_capacity_fractional_contracts", "dollar_contract_notional",
+                        "capacity_limit_contracts", "target_weight", "target_notional",
+                    })
+                    self.assertIsInstance(rounding_target["target_weight"], Decimal)
+                    self.assertIsInstance(rounding_target["target_notional"], Decimal)
+                    self.assertGreaterEqual(rounding_target["target_weight"], Decimal(0))
+                    self.assertGreaterEqual(rounding_target["target_notional"], Decimal(0))
+                    self.assertEqual(
+                        rounding_target["target_notional"],
+                        rounding_target["post_capacity_fractional_contracts"]
+                        * rounding_target["dollar_contract_notional"],
+                    )
+                positive_overflow = [row for row in rounding_targets
+                                     if row["contract"] != case["primary_contract"]
+                                     and row["post_capacity_fractional_contracts"] > 0]
+                for row in positive_overflow:
+                    self.assertGreater(row["target_weight"], Decimal(0))
+                    self.assertGreater(row["target_notional"], Decimal(0))
+                represented = sum((row["target_notional"] for row in rounding_targets), Decimal(0))
+                unimplemented = portfolio.diagnostics[0]["unimplemented_notional"]
+                self.assertLessEqual(abs(represented + unimplemented - requested_notional),
+                                     Decimal("0.01"))
+                expected_weight = source_weight * represented / requested_notional
+                actual_weight = sum((row["target_weight"] for row in rounding_targets), Decimal(0))
+                self.assertLessEqual(abs(actual_weight - expected_weight), Decimal("0.00000000000000000001"))
 
     def test_sequential_overflow_respects_caps_and_unequal_contract_values(self):
         case = next(row for row in self.capacity_fixture["allocation_cases"]

@@ -7,7 +7,7 @@ publication-safe decision-time dollar value. This module never rounds holdings.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal, ROUND_FLOOR, localcontext
 from enum import Enum
 from types import MappingProxyType
 from typing import Iterable, Mapping, Sequence
@@ -128,6 +128,75 @@ class CapacityPortfolio:
     method: CapacityMethod
     rows: tuple[CapacityRow, ...]
     diagnostics: tuple[dict, ...]
+
+
+def capacity_rounding_targets(portfolio: CapacityPortfolio) -> tuple[dict, ...]:
+    """Adapt capacity output to the separate rounding target input contract.
+
+    Each record matches the fields required by ``RoundingTarget`` without
+    importing or implementing the rounding strand. Its target notional is the
+    row's post-capacity fractional notional. Its target weight is that notional's
+    share of AUM, inferred from the original primary target's weight/notional.
+    Thus positive overflow rows receive truthful allocated metadata, while any
+    unimplemented residual remains excluded rather than assigned dummy zeros.
+    """
+    if not isinstance(portfolio, CapacityPortfolio):
+        raise ContractError("Rounding handoff requires a CapacityPortfolio")
+
+    grouped: dict[tuple[str, str, str], list[CapacityRow]] = {}
+    for row in portfolio.rows:
+        grouped.setdefault((row.date, row.strategy, row.commodity), []).append(row)
+
+    adapted = []
+    required_fields = {
+        "commodity", "contract", "maturity_rank",
+        "post_capacity_fractional_contracts", "dollar_contract_notional",
+        "capacity_limit_contracts", "target_weight", "target_notional",
+    }
+    for key, rows in grouped.items():
+        source_rows = [row for row in rows if row.target_notional is not None]
+        if len(source_rows) != 1:
+            raise ContractError(f"Rounding handoff requires one primary target for {key}")
+        source = source_rows[0]
+        if source.target_weight is None:
+            raise ContractError(f"Rounding handoff requires the source target_weight for {key}")
+        source_weight = decimal_value(source.target_weight, "target_weight")
+        source_notional = decimal_value(source.target_notional, "target_notional")
+        if not Decimal(0) <= source_weight <= Decimal(1) or source_notional < 0:
+            raise ContractError("Source target weight/notional is outside the valid range")
+        if source_notional == 0 and any(row.post_capacity_notional > 0 for row in rows):
+            raise ContractError("Positive capacity output cannot come from a zero-notional target")
+
+        for row in rows:
+            if (row.capacity_limit_contracts is None or row.maturity_rank is None
+                    or row.dollar_contract_notional is None):
+                raise ContractError(f"Rounding handoff metadata is incomplete for {row.contract}")
+            quantity = decimal_value(row.post_capacity_fractional_contracts,
+                                     "post_capacity_fractional_contracts")
+            contract_value = decimal_value(row.dollar_contract_notional,
+                                           "dollar_contract_notional")
+            row_notional = quantity * contract_value
+            if row_notional != row.post_capacity_notional:
+                raise ContractError(f"Capacity notional is inconsistent for {row.contract}")
+            if source_notional == 0:
+                row_weight = Decimal(0)
+            else:
+                row_weight = source_weight * row_notional / source_notional
+            record = {
+                "commodity": row.commodity,
+                "contract": row.contract,
+                "maturity_rank": row.maturity_rank,
+                "post_capacity_fractional_contracts": quantity,
+                "dollar_contract_notional": contract_value,
+                "capacity_limit_contracts": row.capacity_limit_contracts,
+                "target_weight": row_weight,
+                "target_notional": row_notional,
+            }
+            if set(record) != required_fields:
+                raise ContractError("Rounding handoff record does not match the rounding input contract")
+            adapted.append(record)
+
+    return tuple(adapted)
 
 
 def _nonnegative_integer(value, name: str) -> int:
@@ -379,13 +448,18 @@ def allocate_overflow_sequential(residual_notional, candidates: Sequence[str],
             unavailable = True
             continue
         cap, value = valid
-        demand = remaining / value
-        amount = min(demand, Decimal(cap))
-        notional = amount * value
+        # Division can round a quotient just above its exact value (for example
+        # 0.29999... / 0.1 -> 3). Floor the positive quotient so its notional
+        # cannot exceed the remaining dollars and create a negative later fill.
+        with localcontext() as context:
+            context.rounding = ROUND_FLOOR
+            demand = remaining / value
+            amount = min(demand, Decimal(cap))
+            notional = amount * value
         allocations[contract] = amount
         demands[contract] = demand
         notionals[contract] = notional
-        remaining -= notional
+        remaining = max(remaining - notional, Decimal(0))
     flags = []
     if not candidates:
         flags.append("no_eligible_deferred_candidate")

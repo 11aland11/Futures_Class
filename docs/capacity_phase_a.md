@@ -42,6 +42,15 @@ stage; their unimplemented exposure and availability flags remain in the
 diagnostics. Every emitted row has an integer capacity ceiling and positive
 maturity rank.
 
+`capacity_rounding_targets(portfolio)` is the explicit capacity-to-rounding
+adapter. It returns records matching the separate `RoundingTarget` input shape
+without importing or reimplementing that strand. The adapter sets each row's
+target notional to its post-capacity fractional notional and allocates the
+source target weight across rows in proportion to those notionals. It requires
+the primary source weight/notional, keeps unimplemented exposure out of the
+rounded targets, and never fills missing metadata with placeholder zeros. The
+handoff tests check the adapter records for all four capacity methods.
+
 ## Reproduce the synthetic demonstration
 
 From the repo root:

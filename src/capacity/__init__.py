@@ -13,6 +13,7 @@ from src.capacity.rules import (
     allocate_overflow_sequential,
     apply_primary_cap,
     build_capacity_portfolio,
+    capacity_rounding_targets,
     compute_adv20,
     decision_time_dollar_contract_value,
     deferred_overflow_candidates,
@@ -24,6 +25,7 @@ __all__ = [
     "ContractValueResult", "OverflowAllocation",
     "PrimaryCap", "allocate_overflow_adv_weighted", "allocate_overflow_next",
     "allocate_overflow_sequential", "apply_primary_cap", "build_capacity_portfolio",
+    "capacity_rounding_targets",
     "compute_adv20", "decision_time_dollar_contract_value",
     "deferred_overflow_candidates", "integer_capacity_limit",
 ]

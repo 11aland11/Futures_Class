@@ -1,12 +1,13 @@
-"""Alternative deferred destinations on the *fixed* Section 0 baseline event dates.
 
+"""Alternative deferred destinations on the *fixed* Section 0 baseline event dates.
 Pure contract-identity logic: no changes to timing, sizing, capacity, rounding,
 weights, benchmark, or accounting. Incomplete paths are explicitly flagged.
+
+Production curve completeness is validated upstream by shared Section 0.
 """
+
 from __future__ import annotations
-
 from dataclasses import dataclass
-
 from src.contracts.eligibility import is_eligible
 from src.contracts.maturity import days_to_anchor
 from src.portfolio.baseline import BaselinePath
@@ -22,7 +23,11 @@ class DestinationSchedule:
 
 
 def _curves(eligible_curve, catalogue, calendar):
-    """Validate supplied curve rows, including the Section 0 as-of fields."""
+    """Validate supplied curve rows, including the Section 0 as-of fields.
+
+    Requires a complete curve validated by Section 0 upstream.
+    Missing rows must not be interpreted as confirmed ineligibility.
+    """
     curves = {}
     for row in eligible_curve:
         day, root, symbol = row["date"], row["commodity"], row["contract"]
@@ -49,7 +54,10 @@ def _curves(eligible_curve, catalogue, calendar):
 
 
 def deferred_candidates(curve, outgoing_contract, decision_date, catalogue):
-    """Eligible same-root contracts strictly later by anchor, sorted deterministically."""
+    """Eligible same-root contracts strictly later by anchor, sorted deterministically.
+
+    Requires a complete decision-date curve validated by Section 0.
+    """
     outgoing = catalogue.get(outgoing_contract)
     if outgoing is None or outgoing.identity.contract != outgoing_contract:
         raise ContractError(f"Unknown outgoing contract: {outgoing_contract}")
@@ -109,9 +117,10 @@ def _choose(candidates, day, rule, calendar, catalogue):
 
 def build_destination_schedule(baseline_path, eligible_curve, calendar, catalogue, rule):
     """Process each baseline event in order, using the alternative's actual outgoing.
-
     Multiple baseline events on one date are allowed. No additional event dates
     are introduced. An impossible transition remains explicitly unimplemented.
+
+    Production callers must use Section 0 completeness-validated curves.
     """
     if rule not in RULE_TARGETS:
         raise ContractError(f"Unknown destination rule: {rule}")
@@ -162,9 +171,10 @@ def build_destination_schedule(baseline_path, eligible_curve, calendar, catalogu
 def apply_destination_rule_to_baseline(baseline_path, destination_schedule,
                                        eligible_curve, calendar, catalogue):
     """Apply decisions to baseline position dates, checking eligibility each day.
-
     A contract becoming ineligible between scheduled events marks the path
     unimplemented; the engine never inserts an unscheduled replacement roll.
+
+    Production callers must use Section 0 completeness-validated curves.
     """
     curves = _curves(eligible_curve, catalogue, calendar)
     baseline_events = baseline_path.roll_events

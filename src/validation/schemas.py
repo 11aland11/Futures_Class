@@ -1,4 +1,4 @@
-"""Shared value types and one schema-name registry for Phase A and deferred exports."""
+"""Shared value types and one schema-name registry for Phase A and Phase B."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -88,7 +88,7 @@ POST_CAPACITY_TARGET_COLUMNS = (
 # Version 8 Appendix B names are reserved here even where Phase A does not
 # materialise a table. Declarations do not imply production validation or data.
 # HOLDINGS_COLUMNS remains the unified engine representation from Section 36;
-# the dedicated benchmark export is a distinct, explicitly deferred view.
+# the dedicated benchmark export is a distinct view of the Phase B holdings.
 TABLE_COLUMNS = {
     "statistic_observations": OBSERVATION_COLUMNS,
     "contracts": (
@@ -124,6 +124,9 @@ TABLE_SCHEMA_STATUS.update({
     "strategy_holdings": "phase_a_holdings_interface",
     "strategy_daily": "phase_a_returns_with_deferred_diagnostics",
 })
+TABLE_SCHEMA_STATUS.update({name: "phase_b_frozen_export" for name in (
+    "contracts", "eligible_curve", "roll_events", "benchmark_holdings", "baseline_holdings", "contract_returns",
+)})
 DEFERRED_STRATEGY_DAILY_FIELDS = ("implemented_notional_share", "quality_flags")
 
 

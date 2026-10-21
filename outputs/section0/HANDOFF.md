@@ -2,7 +2,9 @@
 
 **SECTION 0 HANDOFF READY** for the frozen Version 8 experiment on this branch.
 This Issue #5 contribution builds on merged Phase A PR #18 and the validation
-foundation in PR #26. PR #26 remains a merge dependency; it is not modified here.
+foundation now merged through PR #26. PR #29 is revalidated against exact team main
+`ed97dcc7694de469052502db6348d7dccb867b0e`. All frozen bundle files remain unchanged;
+the four strand engines match main exactly.
 
 ## Frozen decisions
 

@@ -1,8 +1,10 @@
 # Section 0 Phase B: frozen empirical handoff
 
 This contribution completes the real-data handoff for Issue #5 using the accepted
-Issue #4 acquisition and Version 8 parameters. It depends on PR #26's validation
-foundation. Neither that PR nor any strand engine is modified or merged here.
+Issue #4 acquisition and Version 8 parameters. PR #26's validation foundation is
+now merged. PR #29 has been revalidated against team main
+`ed97dcc7694de469052502db6348d7dccb867b0e`, including the merged destination and
+capacity engines. No strand engine or frozen empirical input was changed.
 
 ## Frozen experiment
 
